@@ -45,28 +45,28 @@ class StreamingCRNN(nn.Module):
             n_mels=config.n_mels
         ).to(config.device)
 
+        d = 2 if self.crnn.gru.bidirectional else 1
+        self.hidden = torch.zeros((d * self.crnn.gru.num_layers, 1, self.crnn.gru.hidden_size),
+                                  dtype=torch.float32)
+
         self.gru_output = torch.tensor([], dtype=torch.float32,
                                        device=config.device)
-        self.last_input = torch.tensor([], dtype=torch.float32,
+        self.mel_output = torch.tensor([], dtype=torch.float32,
                                        device=config.device)
         self.current_length = 0
 
     def forward(self, input: torch.Tensor, max_window_length: int):
         input = input.unsqueeze(dim=0)
 
-        # merged = torch.cat([self.last_input, input], dim=-1)
-        # self.last_input = input
-        merged = input
-
         mel_output = torch.log(
-            self.melspec(merged).clamp_(min=1e-9, max=1e9)
+            self.melspec(input).clamp_(min=1e-9, max=1e9)
         ).unsqueeze(dim=1)
 
-        # if self.current_length > 0:
-        #     mel_output = mel_output[..., mel_output.shape[-1] // 2:]
+        self.mel_output = torch.cat([self.mel_output, mel_output], dim=-1)
 
-        conv_output = self.crnn.conv(mel_output).transpose(-1, -2)
-        gru_output, _ = self.crnn.gru(conv_output)
+        conv_output = self.crnn.conv(self.mel_output).transpose(-1, -2)
+        gru_output, hidden = self.crnn.gru(conv_output, self.hidden)
+        self.hidden = hidden
 
         if self.current_length < max_window_length:
             old_gru_output = self.gru_output
@@ -75,6 +75,10 @@ class StreamingCRNN(nn.Module):
             step_size = gru_output.shape[1]
             old_gru_output = self.gru_output[:, step_size:]
         self.gru_output = torch.cat([old_gru_output, gru_output], dim=1)
+
+        drop_frames = ((self.mel_output.shape[-1] - self.kernel_time) //
+                       self.stride_time) * self.stride_time + self.kernel_time
+        self.mel_output = self.mel_output[..., drop_frames + 1:]
 
         contex_vector = self.crnn.attention(self.gru_output)
         logits = self.crnn.classifier(contex_vector)

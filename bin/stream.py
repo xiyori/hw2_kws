@@ -15,7 +15,11 @@ def audio_stream(queue: mp.Queue, device: str,
     https://pytorch.org/audio/stable/tutorials/streaming_api2_tutorial.html
     """
 
-    streamer = StreamReader(src=device, format=format)
+    if format == "auto":
+        streamer = StreamReader(src=device)
+    else:
+        streamer = StreamReader(src=device, format=format)
+
     streamer.add_basic_audio_stream(frames_per_chunk=frames_per_chunk,
                                     buffer_chunk_size=5,
                                     sample_rate=16000)
@@ -45,7 +49,7 @@ def parse_args():
                         help="Input audio format (default: %(default)s).")
     parser.add_argument("-c", "--frames_per_chunk", metavar="CHUNK_SIZE", type=int, default=3840,
                         help="Chunks size in frames (default: %(default)s).")
-    parser.add_argument("-w", "--max_window_length", metavar="WINDOW_SIZE", type=int, default=5,
+    parser.add_argument("-w", "--max_window_length", metavar="WINDOW_SIZE", type=int, default=3,
                         help="Sliding window size in chunks (default: %(default)s).")
     parser.add_argument("-r", "--raw", dest="raw", action="store_true",
                         help="Output raw confidence values instead of detection message.")
@@ -64,8 +68,7 @@ if __name__ == "__main__":
                                           args.format, args.frames_per_chunk))
 
     streaming_process.start()
-    accum = torch.tensor([], dtype=torch.float32)
-    current_length = 0
+
     while True:
         try:
             chunk = chunk_queue.get()
@@ -75,22 +78,15 @@ if __name__ == "__main__":
             if chunk.dim() == 2:
                 chunk = chunk.mean(dim=1)
 
-            if current_length < args.max_window_length:
-                current_length += 1
-            else:
-                step_size = chunk.shape[0]
-                accum = accum[step_size:]
-            accum = torch.cat([accum, chunk], dim=0)
-
             # Pad the last chunk
-            if accum.shape[0] < args.frames_per_chunk:
-                padded_chunk = torch.zeros(args.frames_per_chunk, dtype=accum.dtype)
-                padded_chunk[:accum.shape[0]] = accum
-                accum = padded_chunk
+            if chunk.shape[0] < args.frames_per_chunk:
+                padded_chunk = torch.zeros(args.frames_per_chunk, dtype=chunk.dtype)
+                padded_chunk[:chunk.shape[0]] = chunk
+                chunk = padded_chunk
             # print(f"{chunk.shape}")
 
             with torch.inference_mode():
-                result = model(accum, 1)  # args.max_window_length)
+                result = model(chunk, args.max_window_length)
 
             if args.raw:
                 print(result.item())
